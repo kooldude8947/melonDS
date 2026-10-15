@@ -25,7 +25,9 @@ jobs:
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
     steps:
     - name: Check out sources
-      uses: actions/checkout@v3
+      uses: actions/checkout@v7
+      with:
+        ref: 'release/1.1'
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
       with:
@@ -33,7 +35,7 @@ jobs:
         update: true
         pacboy: gcc:p cmake:p ninja:p make:p
     - name: Restore vcpkg cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: ${{ github.workspace }}/vcpkg_cache
         key: vcpkg-x86_64-mingw-${{ hashFiles('vcpkg.json') }}
@@ -46,12 +48,12 @@ jobs:
       run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=ON
     - name: Build
       run: cmake --build --preset=release-mingw-x86_64
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: melonDS-windows-x86_64
         path: .\build\release-mingw-x86_64\melonDS.exe
     - name: Save vcpkg cache
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: ${{ github.workspace }}/vcpkg_cache
         key: vcpkg-x86_64-mingw-${{ hashFiles('vcpkg.json') }}
