@@ -46,7 +46,7 @@ jobs:
       with:
         vcpkgJsonGlob: vcpkg.json
     - name: Configure
-      run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=ON
+      run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=OFF -DBUILD_STATIC=ON -DUSE_QT6=OFF
     - name: Build
       run: cmake --build --preset=release-mingw-x86_64
     - uses: actions/upload-artifact@v7
