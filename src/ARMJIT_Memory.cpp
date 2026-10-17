@@ -627,6 +627,9 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     return true;
 }
 
+u32 ARMJIT_Memory::PageSize = 0;
+u32 ARMJIT_Memory::PageShift = 0;
+
 bool ARMJIT_Memory::IsFastMemSupported()
 {
 #if defined(__APPLE__) || defined(__OpenBSD__)
