@@ -34,7 +34,7 @@
 		{ "name": "dirent", "platform": "windows" }
 	],
 	"overrides": [
-		{ "name": "libarchive", "version": "3.5.0" }
+		{ "name": "libarchive", "version": "3.4.3" }
 	],
 	"features": {
 		"qt6": {
