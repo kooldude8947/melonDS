@@ -45,7 +45,7 @@ jobs:
       uses: lukka/run-cmake@v10
       with:
         configurePreset: release-windows-${{ matrix.arch.name }}
-        configurePresetAdditionalArgs: "['-DENABLE_DEBUG_DEPS=OFF', '-DMELONDS_EMBED_BUILD_INFO=ON', '-DUSE_QT6=OFF', '-DENABLE_JIT=OFF']"
+        configurePresetAdditionalArgs: "['-DENABLE_DEBUG_DEPS=OFF', '-DMELONDS_EMBED_BUILD_INFO=OFF', '-DUSE_QT6=OFF']"
         buildPreset: release-windows-${{ matrix.arch.name }}
     - uses: actions/upload-artifact@v7
       with:
