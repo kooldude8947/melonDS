@@ -144,8 +144,8 @@ public:
     static void RegisterFaultHandler();
     static void UnregisterFaultHandler();
 
-    static u32 PageSize = 0;
-    static u32 PageShift = 0;
+    static u32 PageSize;
+    static u32 PageShift;
 private:
     friend class Compiler;
     struct Mapping
