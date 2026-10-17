@@ -3,8 +3,8 @@
 		"default-registry": {
 			"kind": "git",
 			"repository": "https://github.com/Microsoft/vcpkg",
-			"baseline": "9b965a116838c6cdcd36bca60d1b81b030c8ab8d",
-			"reference": "9b965a116838c6cdcd36bca60d1b81b030c8ab8d"
+			"baseline": "9f73bc1a0e71b8883f20cae72a4e63ce347a3493",
+			"reference": "9f73bc1a0e71b8883f20cae72a4e63ce347a3493"
 		},
 		"overlay-ports": [ "./cmake/overlay-ports" ],
 		"overlay-triplets": [ "./cmake/overlay-triplets" ]
@@ -32,9 +32,6 @@
 		"pkgconf",
 		{ "name": "pkgconf", "host": true },
 		{ "name": "dirent", "platform": "windows" }
-	],
-	"overrides": [
-		{ "name": "libarchive", "version": "3.4.3" }
 	],
 	"features": {
 		"qt6": {
