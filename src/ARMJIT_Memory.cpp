@@ -39,7 +39,6 @@
 
 #include "ARMJIT_Internal.h"
 #include "ARMJIT_Compiler.h"
-#include "ARMJIT_Global.h"
 
 #include "DSi.h"
 #include "GPU.h"
@@ -83,8 +82,6 @@
         #define CONTEXT_PC uc_mcontext.mc_rip
     #elif defined(__NetBSD__)
         #define CONTEXT_PC uc_mcontext.__gregs[_REG_RIP]
-    #elif defined(__OpenBSD__)
-        #define CONTEXT_PC sc_rip
     #endif
 #elif defined(__aarch64__)
     #if defined(_WIN32)
@@ -97,16 +94,11 @@
         #define CONTEXT_PC uc_mcontext.mc_gpregs.gp_elr
     #elif defined(__NetBSD__)
         #define CONTEXT_PC uc_mcontext.__gregs[_REG_PC]
-    #elif defined(__OpenBSD__)
-        #define CONTEXT_PC sc_elr
     #endif
 #endif
 
 namespace melonDS
 {
-
-static constexpr u64 AddrSpaceSize = 0x100000000;
-static constexpr u64 VirtmemAreaSize = AddrSpaceSize * 2 + MemoryTotalSize;
 
 using Platform::Log;
 using Platform::LogLevel;
@@ -160,15 +152,6 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx)
 
 #elif defined(_WIN32)
 
-static LPVOID ExceptionHandlerHandle = nullptr;
-static HMODULE KernelBaseDll = nullptr;
-
-using VirtualAlloc2Type = PVOID WINAPI (*)(HANDLE Process, PVOID BaseAddress, SIZE_T Size, ULONG AllocationType, ULONG PageProtection, MEM_EXTENDED_PARAMETER* ExtendedParameters, ULONG ParameterCount);
-using MapViewOfFile3Type = PVOID WINAPI (*)(HANDLE FileMapping, HANDLE Process, PVOID BaseAddress, ULONG64 Offset, SIZE_T ViewSize, ULONG AllocationType, ULONG PageProtection, MEM_EXTENDED_PARAMETER* ExtendedParameters, ULONG ParameterCount);
-
-static VirtualAlloc2Type virtualAlloc2Ptr;
-static MapViewOfFile3Type mapViewOfFile3Ptr;
-
 LONG ARMJIT_Memory::ExceptionHandler(EXCEPTION_POINTERS* exceptionInfo)
 {
     if (exceptionInfo->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
@@ -187,7 +170,6 @@ LONG ARMJIT_Memory::ExceptionHandler(EXCEPTION_POINTERS* exceptionInfo)
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
-    Log(LogLevel::Debug, "it all returns to nothing\n");
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -279,61 +261,18 @@ enum
     memstate_MappedProtected,
 };
 
-#define CHECK_ALIGNED(value) assert(((value) & (PageSize-1)) == 0)
+
 
 bool ARMJIT_Memory::MapIntoRange(u32 addr, u32 num, u32 offset, u32 size) noexcept
 {
-    CHECK_ALIGNED(addr);
-    CHECK_ALIGNED(offset);
-    CHECK_ALIGNED(size);
-
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
     Result r = (svcMapProcessMemory(dst, envGetOwnProcessHandle(),
         (u64)(MemoryBaseCodeMem + offset), size));
     return R_SUCCEEDED(r);
 #elif defined(_WIN32)
-    uintptr_t uintptrDst = reinterpret_cast<uintptr_t>(dst);
-    for (auto it = VirtmemPlaceholders.begin(); it != VirtmemPlaceholders.end(); it++)
-    {
-        if (uintptrDst >= it->Start && uintptrDst+size <= it->Start+it->Size)
-        {
-            //Log(LogLevel::Debug, "found mapping %llx %llx %llx %llx\n", uintptrDst, size, it->Start, it->Size);
-            // we split this place holder so that we have a fitting place holder for the mapping
-            if (uintptrDst != it->Start || size != it->Size)
-            {
-                if (!VirtualFree(dst, size, MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER))
-                {
-                    Log(LogLevel::Debug, "VirtualFree failed with %x\n", GetLastError());
-                    return false;
-                }
-            }
-
-            VirtmemPlaceholder splitPlaceholder = *it;
-            VirtmemPlaceholders.erase(it);
-            if (uintptrDst > splitPlaceholder.Start)
-            {
-                //Log(LogLevel::Debug, "splitting on the left %llx\n", uintptrDst - splitPlaceholder.Start);
-                VirtmemPlaceholders.push_back({splitPlaceholder.Start, uintptrDst - splitPlaceholder.Start});
-            }
-            if (uintptrDst+size < splitPlaceholder.Start+splitPlaceholder.Size)
-            {
-                //Log(LogLevel::Debug, "splitting on the right %llx\n", (splitPlaceholder.Start+splitPlaceholder.Size)-(uintptrDst+size));
-                VirtmemPlaceholders.push_back({uintptrDst+size, (splitPlaceholder.Start+splitPlaceholder.Size)-(uintptrDst+size)});
-            }
-
-            if (!mapViewOfFile3Ptr(MemoryFile, nullptr, dst, offset, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0))
-            {
-                Log(LogLevel::Debug, "MapViewOfFile3 failed with %x\n", GetLastError());
-                return false;
-            }
-
-            return true;
-        }
-    }
-
-    Log(LogLevel::Debug, "no mapping at all found??? %p %x %p\n", dst, size, MemoryBase);
-    return false;
+    bool r = MapViewOfFileEx(MemoryFile, FILE_MAP_READ | FILE_MAP_WRITE, 0, offset, size, dst) == dst;
+    return r;
 #else
     return mmap(dst, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, offset) != MAP_FAILED;
 #endif
@@ -341,68 +280,21 @@ bool ARMJIT_Memory::MapIntoRange(u32 addr, u32 num, u32 offset, u32 size) noexce
 
 bool ARMJIT_Memory::UnmapFromRange(u32 addr, u32 num, u32 offset, u32 size) noexcept
 {
-    CHECK_ALIGNED(addr);
-    CHECK_ALIGNED(offset);
-    CHECK_ALIGNED(size);
-
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
     Result r = svcUnmapProcessMemory(dst, envGetOwnProcessHandle(),
         (u64)(MemoryBaseCodeMem + offset), size);
     return R_SUCCEEDED(r);
 #elif defined(_WIN32)
-    if (!UnmapViewOfFileEx(dst, MEM_PRESERVE_PLACEHOLDER))
-    {
-        Log(LogLevel::Debug, "UnmapViewOfFileEx failed %x\n", GetLastError());
-        return false;
-    }
-
-    uintptr_t uintptrDst = reinterpret_cast<uintptr_t>(dst);
-    uintptr_t coalesceStart = uintptrDst;
-    size_t coalesceSize = size;
-
-    for (auto it = VirtmemPlaceholders.begin(); it != VirtmemPlaceholders.end();)
-    {
-        if (it->Start+it->Size == uintptrDst)
-        {
-            //Log(LogLevel::Debug, "Coalescing to the left\n");
-            coalesceStart = it->Start;
-            coalesceSize += it->Size;
-            it = VirtmemPlaceholders.erase(it);
-        }
-        else if (it->Start == uintptrDst+size)
-        {
-            //Log(LogLevel::Debug, "Coalescing to the right\n");
-            coalesceSize += it->Size;
-            it = VirtmemPlaceholders.erase(it);
-        }
-        else
-        {
-            it++;
-        }
-    }
-
-    if (coalesceStart != uintptrDst || coalesceSize != size)
-    {
-        if (!VirtualFree(reinterpret_cast<void*>(coalesceStart), coalesceSize, MEM_RELEASE|MEM_COALESCE_PLACEHOLDERS))
-            return false;
-
-    }
-    VirtmemPlaceholders.push_back({coalesceStart, coalesceSize});
-    //Log(LogLevel::Debug, "Adding coalesced region %llx %llx", coalesceStart, coalesceSize);
-
-    return true;
+    return UnmapViewOfFile(dst);
 #else
-    return mmap(dst, size, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) != MAP_FAILED;
+    return munmap(dst, size) == 0;
 #endif
 }
 
 #ifndef __SWITCH__
 void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int protection) noexcept
 {
-    CHECK_ALIGNED(addr);
-    CHECK_ALIGNED(size);
-
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #if defined(_WIN32)
     DWORD winProtection, oldProtection;
@@ -413,10 +305,6 @@ void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int prot
     else
         winProtection = PAGE_READWRITE;
     bool success = VirtualProtect(dst, size, winProtection, &oldProtection);
-    if (!success)
-    {
-        Log(LogLevel::Debug, "VirtualProtect failed with %x\n", GetLastError());
-    }
     assert(success);
 #else
     int posixProt;
@@ -447,14 +335,14 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
         else
         {
             u32 segmentOffset = offset;
-            u8 status = statuses[(Addr + offset) >> PageShift];
-            while (statuses[(Addr + offset) >> PageShift] == status
+            u8 status = statuses[(Addr + offset) >> 12];
+            while (statuses[(Addr + offset) >> 12] == status
                    && offset < Size
                    && (!skipDTCM || Addr + offset != dtcmStart))
             {
-                assert(statuses[(Addr + offset) >> PageShift] != memstate_Unmapped);
-                statuses[(Addr + offset) >> PageShift] = memstate_Unmapped;
-                offset += PageSize;
+                assert(statuses[(Addr + offset) >> 12] != memstate_Unmapped);
+                statuses[(Addr + offset) >> 12] = memstate_Unmapped;
+                offset += 0x1000;
             }
 
 #ifdef __SWITCH__
@@ -470,6 +358,7 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
     }
 
 #ifndef __SWITCH__
+#ifndef _WIN32
     u32 dtcmEnd = dtcmStart + dtcmSize;
     if (Num == 0
         && dtcmEnd >= Addr
@@ -489,6 +378,7 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
         }
     }
     else
+#endif
     {
         bool succeded = nds.JIT.Memory.UnmapFromRange(Addr, Num, OffsetsPerRegion[region] + LocalOffset, Size);
         assert(succeded);
@@ -498,7 +388,7 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
 
 void ARMJIT_Memory::SetCodeProtection(int region, u32 offset, bool protect) noexcept
 {
-    offset &= ~(PageSize - 1);
+    offset &= ~0xFFF;
     //printf("set code protection %d %x %d\n", region, offset, protect);
 
     for (int i = 0; i < Mappings[region].Length; i++)
@@ -516,9 +406,9 @@ void ARMJIT_Memory::SetCodeProtection(int region, u32 offset, bool protect) noex
 
         u8* states = (u8*)(mapping.Num == 0 ? MappingStatus9 : MappingStatus7);
 
-        //printf("%x %d %x %x %x %d\n", effectiveAddr, mapping.Num, mapping.Addr, mapping.LocalOffset, mapping.Size, states[effectiveAddr >> PageShift]);
-        assert(states[effectiveAddr >> PageShift] == (protect ? memstate_MappedRW : memstate_MappedProtected));
-        states[effectiveAddr >> PageShift] = protect ? memstate_MappedProtected : memstate_MappedRW;
+        //printf("%x %d %x %x %x %d\n", effectiveAddr, mapping.Num, mapping.Addr, mapping.LocalOffset, mapping.Size, states[effectiveAddr >> 12]);
+        assert(states[effectiveAddr >> 12] == (protect ? memstate_MappedRW : memstate_MappedProtected));
+        states[effectiveAddr >> 12] = protect ? memstate_MappedProtected : memstate_MappedRW;
 
 #if defined(__SWITCH__)
         bool success;
@@ -528,7 +418,7 @@ void ARMJIT_Memory::SetCodeProtection(int region, u32 offset, bool protect) noex
             success = MapIntoRange(effectiveAddr, mapping.Num, OffsetsPerRegion[region] + offset, 0x1000);
         assert(success);
 #else
-        SetCodeProtectionRange(effectiveAddr, PageSize, mapping.Num, protect ? 1 : 2);
+        SetCodeProtectionRange(effectiveAddr, 0x1000, mapping.Num, protect ? 1 : 2);
 #endif
     }
 }
@@ -653,19 +543,11 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     u32 dtcmSize = ~NDS.ARM9.DTCMMask + 1;
     u32 dtcmEnd = dtcmStart + dtcmSize;
 #ifndef __SWITCH__
+#ifndef _WIN32
     if (num == 0
         && dtcmEnd >= mirrorStart
         && dtcmStart < mirrorStart + mirrorSize)
     {
-        if (dtcmSize < PageSize)
-        {
-            // we could technically mask out the DTCM by setting a hole to access permissions
-            // but realistically there isn't much of a point in mapping less than 16kb of DTCM
-            // so it isn't worth more complex support
-            Log(LogLevel::Info, "DTCM size smaller than 16kb skipping mapping entirely");
-            return false;
-        }
-
         bool success;
         if (dtcmStart > mirrorStart)
         {
@@ -680,6 +562,7 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
         }
     }
     else
+#endif
     {
         bool succeded = MapIntoRange(mirrorStart, num, OffsetsPerRegion[region] + memoryOffset, mirrorSize);
         assert(succeded);
@@ -696,19 +579,22 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     {
         if (skipDTCM && mirrorStart + offset == dtcmStart)
         {
+#ifdef _WIN32
+            SetCodeProtectionRange(dtcmStart, dtcmSize, 0, 0);
+#endif
             offset += dtcmSize;
         }
         else
         {
             u32 sectionOffset = offset;
-            bool hasCode = isExecutable && PageContainsCode(&range[offset / 512], PageSize);
+            bool hasCode = isExecutable && PageContainsCode(&range[offset / 512]);
             while (offset < mirrorSize
-                && (!isExecutable || PageContainsCode(&range[offset / 512], PageSize) == hasCode)
+                && (!isExecutable || PageContainsCode(&range[offset / 512]) == hasCode)
                 && (!skipDTCM || mirrorStart + offset != NDS.ARM9.DTCMBase))
             {
-                assert(states[(mirrorStart + offset) >> PageShift] == memstate_Unmapped);
-                states[(mirrorStart + offset) >> PageShift] = hasCode ? memstate_MappedProtected : memstate_MappedRW;
-                offset += PageSize;
+                assert(states[(mirrorStart + offset) >> 12] == memstate_Unmapped);
+                states[(mirrorStart + offset) >> 12] = hasCode ? memstate_MappedProtected : memstate_MappedRW;
+                offset += 0x1000;
             }
 
             u32 sectionSize = offset - sectionOffset;
@@ -738,9 +624,6 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     return true;
 }
 
-u32 ARMJIT_Memory::PageSize = 0;
-u32 ARMJIT_Memory::PageShift = 0;
-
 bool ARMJIT_Memory::IsFastMemSupported()
 {
 #if defined(__APPLE__) || defined(__OpenBSD__)
@@ -752,7 +635,7 @@ bool ARMJIT_Memory::IsFastMemSupported()
     {
 #ifdef _WIN32
         ARMJIT_Global::Init();
-        isSupported = virtualAlloc2Ptr != nullptr;
+        isSupported = false;
         ARMJIT_Global::DeInit();
 
         PageSize = RegularPageSize;
@@ -826,24 +709,21 @@ bool ARMJIT_Memory::FaultHandler(FaultDescription& faultDesc, melonDS::NDS& nds)
 
         u8* memStatus = nds.CurCPU == 0 ? nds.JIT.Memory.MappingStatus9 : nds.JIT.Memory.MappingStatus7;
 
-        if (memStatus[faultDesc.EmulatedFaultAddr >> PageShift] == memstate_Unmapped)
+        if (memStatus[faultDesc.EmulatedFaultAddr >> 12] == memstate_Unmapped)
             rewriteToSlowPath = !nds.JIT.Memory.MapAtAddress(faultDesc.EmulatedFaultAddr);
 
         if (rewriteToSlowPath)
-        {
-            nds.JIT.JitEnableWrite();
             faultDesc.FaultPC = nds.JIT.JITCompiler.RewriteMemAccess(faultDesc.FaultPC);
-            nds.JIT.JitEnableExecute();
-        }
 
         return true;
     }
     return false;
 }
 
+const u64 AddrSpaceSize = 0x100000000;
+
 ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 {
-    ARMJIT_Global::Init();
 #if defined(__SWITCH__)
     MemoryBase = (u8*)aligned_alloc(0x1000, MemoryTotalSize);
     virtmemLock();
@@ -868,27 +748,33 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 
     u8* basePtr = MemoryBaseCodeMem;
 #elif defined(_WIN32)
-    if (virtualAlloc2Ptr)
-    {
-        MemoryFile = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, MemoryTotalSize, nullptr);
+    ExceptionHandlerHandle = AddVectoredExceptionHandler(1, ExceptionHandler);
 
-        MemoryBase = reinterpret_cast<u8*>(virtualAlloc2Ptr(nullptr, nullptr, VirtmemAreaSize,
-            MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
-            PAGE_NOACCESS,
-            nullptr, 0));
-        // split off placeholder and map base mapping
-        VirtualFree(MemoryBase, MemoryTotalSize, MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER);
-        mapViewOfFile3Ptr(MemoryFile, nullptr, MemoryBase, 0, MemoryTotalSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+    MemoryFile = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, MemoryTotalSize, NULL);
 
-        VirtmemPlaceholders.push_back({reinterpret_cast<uintptr_t>(MemoryBase)+MemoryTotalSize, AddrSpaceSize*2});
-    }
-    else
-    {
-        // old Windows version
-        MemoryBase = new u8[MemoryTotalSize];
-    }
+    MemoryBase = (u8*)VirtualAlloc(NULL, AddrSpaceSize*4, MEM_RESERVE, PAGE_READWRITE);
+    VirtualFree(MemoryBase, 0, MEM_RELEASE);
+    // this is incredible hacky
+    // but someone else is trying to go into our address space!
+    // Windows will very likely give them virtual memory starting at the same address
+    // as it is giving us now.
+    // That's why we don't use this address, but instead 4gb inwards
+    // I know this is terrible
+    FastMem9Start = MemoryBase + AddrSpaceSize;
+    FastMem7Start = MemoryBase + AddrSpaceSize*2;
+    MemoryBase = MemoryBase + AddrSpaceSize*3;
+
+    MapViewOfFileEx(MemoryFile, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, MemoryTotalSize, MemoryBase);
 #else
-    MemoryBase = (u8*)mmap(nullptr, VirtmemAreaSize, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    // this used to be allocated with three different mmaps
+    // The idea was to give the OS more freedom where to position the buffers,
+    // but something was bad about this so instead we take this vmem eating monster
+    // which seems to work better.
+    MemoryBase = (u8*)mmap(NULL, AddrSpaceSize*4, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    munmap(MemoryBase, AddrSpaceSize*4);
+    FastMem9Start = MemoryBase;
+    FastMem7Start = MemoryBase + AddrSpaceSize;
+    MemoryBase = MemoryBase + AddrSpaceSize*2;
 
 #if defined(__ANDROID__)
     Libandroid = Platform::DynamicLibrary_Load("libandroid.so");
@@ -908,7 +794,7 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
     }
 #else
     char fastmemPidName[snprintf(NULL, 0, "/melondsfastmem%d", getpid()) + 1];
-    snprintf(fastmemPidName, sizeof(fastmemPidName), "/melondsfastmem%d", getpid());
+    sprintf(fastmemPidName, "/melondsfastmem%d", getpid());
     MemoryFile = shm_open(fastmemPidName, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (MemoryFile == -1)
     {
@@ -921,10 +807,20 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
         Log(LogLevel::Error, "Failed to allocate memory using ftruncate! (%s)", strerror(errno));
     }
 
-    mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, 0);
+    struct sigaction sa;
+    sa.sa_handler = nullptr;
+    sa.sa_sigaction = &SigsegvHandler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &OldSaSegv);
+#ifdef __APPLE__
+    sigaction(SIGBUS, &sa, &OldSaBus);
 #endif
-    FastMem9Start = MemoryBase+MemoryTotalSize;
-    FastMem7Start = static_cast<u8*>(FastMem9Start)+AddrSpaceSize;
+
+    mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, 0);
+
+    u8* basePtr = MemoryBase;
+#endif
 }
 
 ARMJIT_Memory::~ARMJIT_Memory() noexcept
@@ -945,36 +841,34 @@ ARMJIT_Memory::~ARMJIT_Memory() noexcept
     free(MemoryBase);
     MemoryBase = nullptr;
 #elif defined(_WIN32)
-    if (virtualAlloc2Ptr)
-    {
-        if (MemoryBase)
-        {
-            bool viewUnmapped = UnmapViewOfFileEx(MemoryBase, MEM_PRESERVE_PLACEHOLDER);
-            assert(viewUnmapped);
-            bool viewCoalesced = VirtualFree(MemoryBase, VirtmemAreaSize, MEM_RELEASE|MEM_COALESCE_PLACEHOLDERS);
-            assert(viewCoalesced);
-            bool freeEverything = VirtualFree(MemoryBase, 0, MEM_RELEASE);
-            assert(freeEverything);
-
-            MemoryBase = nullptr;
-            FastMem9Start = nullptr;
-            FastMem7Start = nullptr;
-        }
-
-        if (MemoryFile)
-        {
-            CloseHandle(MemoryFile);
-            MemoryFile = INVALID_HANDLE_VALUE;
-        }
-    }
-    else
-    {
-        delete[] MemoryBase;
-    }
-#else
     if (MemoryBase)
     {
-        munmap(MemoryBase, VirtmemAreaSize);
+        bool viewUnmapped = UnmapViewOfFile(MemoryBase);
+        assert(viewUnmapped);
+        MemoryBase = nullptr;
+        FastMem9Start = nullptr;
+        FastMem7Start = nullptr;
+    }
+
+    if (MemoryFile)
+    {
+        CloseHandle(MemoryFile);
+        MemoryFile = INVALID_HANDLE_VALUE;
+    }
+
+    if (ExceptionHandlerHandle)
+    {
+        RemoveVectoredExceptionHandler(ExceptionHandlerHandle);
+        ExceptionHandlerHandle = nullptr;
+    }
+#else
+    sigaction(SIGSEGV, &OldSaSegv, nullptr);
+#ifdef __APPLE__
+    sigaction(SIGBUS, &OldSaBus, nullptr);
+#endif
+    if (MemoryBase)
+    {
+        munmap(MemoryBase, MemoryTotalSize);
         MemoryBase = nullptr;
         FastMem9Start = nullptr;
         FastMem7Start = nullptr;
@@ -986,8 +880,6 @@ ARMJIT_Memory::~ARMJIT_Memory() noexcept
         MemoryFile = -1;
     }
 
-    Log(LogLevel::Info, "unmappinged everything\n");
-
 #if defined(__ANDROID__)
     if (Libandroid)
     {
@@ -997,8 +889,6 @@ ARMJIT_Memory::~ARMJIT_Memory() noexcept
 #endif
 
 #endif
-
-    ARMJIT_Global::DeInit();
 }
 
 void ARMJIT_Memory::Reset() noexcept
@@ -1021,6 +911,17 @@ void ARMJIT_Memory::Reset() noexcept
 
 bool ARMJIT_Memory::IsFastmemCompatible(int region) const noexcept
 {
+#ifdef _WIN32
+    /*
+        TODO: with some hacks, the smaller shared WRAM regions
+        could be mapped in some occaisons as well
+    */
+    if (region == memregion_DTCM
+        || region == memregion_SharedWRAM
+        || region == memregion_NewSharedWRAM_B
+        || region == memregion_NewSharedWRAM_C)
+        return false;
+#endif
     return OffsetsPerRegion[region] != UINT32_MAX;
 }
 
@@ -1371,11 +1272,11 @@ void VRAMWrite(u32 addr, T val)
 {
     switch (addr & 0x00E00000)
     {
-    case 0x00000000: NDS::Current->GPU.SyncVRAM_ABG(addr, true); NDS::Current->GPU.WriteVRAM_ABG<T>(addr, val); return;
-    case 0x00200000: NDS::Current->GPU.SyncVRAM_BBG(addr, true); NDS::Current->GPU.WriteVRAM_BBG<T>(addr, val); return;
-    case 0x00400000: NDS::Current->GPU.SyncVRAM_AOBJ(addr, true); NDS::Current->GPU.WriteVRAM_AOBJ<T>(addr, val); return;
-    case 0x00600000: NDS::Current->GPU.SyncVRAM_BOBJ(addr, true); NDS::Current->GPU.WriteVRAM_BOBJ<T>(addr, val); return;
-    default: NDS::Current->GPU.SyncVRAM_LCDC(addr, true); NDS::Current->GPU.WriteVRAM_LCDC<T>(addr, val); return;
+    case 0x00000000: NDS::Current->GPU.WriteVRAM_ABG<T>(addr, val); return;
+    case 0x00200000: NDS::Current->GPU.WriteVRAM_BBG<T>(addr, val); return;
+    case 0x00400000: NDS::Current->GPU.WriteVRAM_AOBJ<T>(addr, val); return;
+    case 0x00600000: NDS::Current->GPU.WriteVRAM_BOBJ<T>(addr, val); return;
+    default: NDS::Current->GPU.WriteVRAM_LCDC<T>(addr, val); return;
     }
 }
 template <typename T>
@@ -1383,11 +1284,11 @@ T VRAMRead(u32 addr)
 {
     switch (addr & 0x00E00000)
     {
-    case 0x00000000: NDS::Current->GPU.SyncVRAM_ABG(addr, false); return NDS::Current->GPU.ReadVRAM_ABG<T>(addr);
-    case 0x00200000: NDS::Current->GPU.SyncVRAM_BBG(addr, false); return NDS::Current->GPU.ReadVRAM_BBG<T>(addr);
-    case 0x00400000: NDS::Current->GPU.SyncVRAM_AOBJ(addr, false); return NDS::Current->GPU.ReadVRAM_AOBJ<T>(addr);
-    case 0x00600000: NDS::Current->GPU.SyncVRAM_BOBJ(addr, false); return NDS::Current->GPU.ReadVRAM_BOBJ<T>(addr);
-    default: NDS::Current->GPU.SyncVRAM_LCDC(addr, false); return NDS::Current->GPU.ReadVRAM_LCDC<T>(addr);
+    case 0x00000000: return NDS::Current->GPU.ReadVRAM_ABG<T>(addr);
+    case 0x00200000: return NDS::Current->GPU.ReadVRAM_BBG<T>(addr);
+    case 0x00400000: return NDS::Current->GPU.ReadVRAM_AOBJ<T>(addr);
+    case 0x00600000: return NDS::Current->GPU.ReadVRAM_BOBJ<T>(addr);
+    default: return NDS::Current->GPU.ReadVRAM_LCDC<T>(addr);
     }
 }
 
@@ -1433,14 +1334,9 @@ static void GPU_WriteVRAM_ARM7(u32 addr, T val) noexcept
     NDS::Current->GPU.WriteVRAM_ARM7<T>(addr, val);
 }
 
-u32 NDSCartSlot_ReadROMData9()
-{
-    return NDS::Current->NDSCartSlots[0]->ReadROMData(0);
-}
-
-u32 NDSCartSlot_ReadROMData7()
-{
-    return NDS::Current->NDSCartSlots[0]->ReadROMData(1);
+u32 NDSCartSlot_ReadROMData()
+{ // TODO: Add a NDS* parameter, when NDS* is eventually implemented
+    return NDS::Current->NDSCartSlot.ReadROMData();
 }
 
 static u8 NDS_ARM9IORead8(u32 addr)
@@ -1510,8 +1406,8 @@ void* ARMJIT_Memory::GetFuncForAddr(ARM* cpu, u32 addr, bool store, int size) co
         switch (addr & 0xFF000000)
         {
         case 0x04000000:
-            if (!store && size == 32 && addr == 0x04100010)
-                return (void*)NDSCartSlot_ReadROMData9;
+            if (!store && size == 32 && addr == 0x04100010 && NDS.ExMemCnt[0] & (1<<11))
+                return (void*)NDSCartSlot_ReadROMData;
 
             /*
                 unfortunately we can't map GPU2D this way
