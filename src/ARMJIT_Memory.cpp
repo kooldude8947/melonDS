@@ -152,6 +152,9 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx)
 
 #elif defined(_WIN32)
 
+static LPVOID ExceptionHandlerHandle = nullptr;
+static HMODULE KernelBaseDll = nullptr;
+
 LONG ARMJIT_Memory::ExceptionHandler(EXCEPTION_POINTERS* exceptionInfo)
 {
     if (exceptionInfo->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
@@ -634,9 +637,7 @@ bool ARMJIT_Memory::IsFastMemSupported()
     if (!initialised)
     {
 #ifdef _WIN32
-        ARMJIT_Global::Init();
         isSupported = false;
-        ARMJIT_Global::DeInit();
 
         PageSize = RegularPageSize;
 #else
@@ -656,16 +657,7 @@ void ARMJIT_Memory::RegisterFaultHandler()
     ExceptionHandlerHandle = AddVectoredExceptionHandler(1, ExceptionHandler);
 
     KernelBaseDll = LoadLibrary("KernelBase.dll");
-   if (KernelBaseDll)
-    {
-        virtualAlloc2Ptr = reinterpret_cast<VirtualAlloc2Type>(GetProcAddress(KernelBaseDll, "VirtualAlloc2"));
-        mapViewOfFile3Ptr = reinterpret_cast<MapViewOfFile3Type>(GetProcAddress(KernelBaseDll, "MapViewOfFile3"));
-    }
-
-    if (!virtualAlloc2Ptr)
-    {
-        Log(LogLevel::Error, "Could not load new Windows virtual memory functions, fast memory is disabled.\n");
-    }
+    Log(LogLevel::Error, "Could not load new Windows virtual memory functions, fast memory is disabled.\n");
 #else
     struct sigaction sa;
     sa.sa_handler = nullptr;
