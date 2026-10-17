@@ -185,6 +185,7 @@ private:
 
     static LONG ExceptionHandler(EXCEPTION_POINTERS* exceptionInfo);
     HANDLE MemoryFile = INVALID_HANDLE_VALUE;
+    LPVOID ExceptionHandlerHandle = nullptr;
 #else
 
     static void SigsegvHandler(int sig, siginfo_t* info, void* rawContext);
