@@ -85,6 +85,16 @@ typedef void (*InterpreterFunc)(ARM* cpu);
 extern InterpreterFunc InterpretARM[];
 extern InterpreterFunc InterpretTHUMB[];
 
+inline bool PageContainsCode(const AddressRange* range)
+{
+    for (int i = 0; i < 8; i++)
+    {
+        if (range[i].Blocks.Length > 0)
+            return true;
+    }
+    return false;
+}
+
 inline bool PageContainsCode(const AddressRange* range, u32 pageSize)
 {
     for (int i = 0; i < pageSize / 512; i++)
